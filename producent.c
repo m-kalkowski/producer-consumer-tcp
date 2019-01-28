@@ -64,7 +64,7 @@ int main(int argc, char *argv[]) {
     char *addr_port = NULL;
     char *addr = NULL;
     char *Port = NULL;
-    addr_port = argv[5];
+    addr_port = argv[argc - 1];
     if (addr_port == NULL) {
         printf("Invalid option: addres:port\n");
         abort();
@@ -84,7 +84,7 @@ int main(int argc, char *argv[]) {
     }
 
     printf("path: %s, tempo: %f, addr: %s, port: %s\n", path, tempo, addr, Port);
-
+    port = atoi(Port);
     /*port = argc > 1 ? atoi(argv[1]) : 0;
     if (!port) {
         printf("Enter Port: ");
