@@ -167,6 +167,18 @@ int main(int argc, char *argv[]) {
         exit(1);
 	}
 
+    char txBuff[4];
+    char rxBuff[112 * 1024];
+
+    for (int i=0; i<numberOfMessages; ++i) {
+        write(socket_fd, txBuff, sizeof(txBuff));
+    }
+
+    for (int i=0; i<numberOfMessages; ++i) {
+        read(socket_fd, rxBuff, sizeof(rxBuff));
+        printf("%s\n", rxBuff);
+    }
+
     /* TODO: Put server interaction code here. For example, use
      * write(socket_fd,,) and read(socket_fd,,) to send and receive messages
      * with the client.
