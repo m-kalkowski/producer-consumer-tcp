@@ -1,9 +1,3 @@
-/*
- * client.c
- * Version 20161003
- * Written by Harry Wong (RedAndBlueEraser)
- */
-
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -176,7 +170,7 @@ int main(int argc, char *argv[]) {
 
     for (int i=0; i<numberOfMessages; ++i) {
         read(socket_fd, rxBuff, sizeof(rxBuff));
-        printf("%s\n", rxBuff);
+        printf("%d\n", i);
     }
 
     /* TODO: Put server interaction code here. For example, use

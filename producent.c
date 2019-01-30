@@ -1,11 +1,7 @@
-/*
- * server.c
- * Version 20161003
- * Written by Harry Wong (RedAndBlueEraser)
- */
 #include "ringbuff.h"
 
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <pthread.h>
 #include <signal.h>
 #include <ctype.h>
@@ -14,6 +10,8 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <time.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define BACKLOG 10
@@ -30,20 +28,12 @@ typedef struct producer_arg_t {
     float tempo;
 } producer_arg_t;
 
-// Stworzenie struktury magazynu w postaci bufora cyklicznego
-/*typedef struct circ_bbuf_t {
-    char buffer[BUFF_SIZE];
-    int head;
-    int tail;
-} circ_bbuf_t;
-
-circ_bbuf_t circ_buf = {
-    .buffer = {0},
-    .head = 0,
-    .tail = 0,
-};*/
-
 pthread_mutex_t circ_buf_lock;
+pthread_mutex_t file_lock;
+FILE *fp;
+double wall0;
+double cpu0;
+int numOfConnectedClients = 0;
 
 /* Thread routine to serve connection to client. */
 void *pthread_routine(void *arg);
@@ -51,48 +41,24 @@ void *pthread_routine(void *arg);
 /* Thread routine to serve producer function. */
 void *producer_routine(void *arg);
 
+void *timer_routine(void *arg);
+
 /* Signal handler to handle SIGTERM and SIGINT signals. */
 void signal_handler(int signal_number);
 
-/*int circ_bbuf_push(circ_bbuf_t *c, char *data, int step)
-{
-    int next;
-
-    next = c->head + step;
-    if (next >= BUFF_SIZE)
-        next = 0;
-
-    if (next == c->tail)
-        return -1;
-
-    for (int i=0; i<step; ++i)
-        c->buffer[c->head + i] = data[i];
-
-    c->head = next;
-    return 0;
-}
-
-int circ_bbuf_pop(circ_bbuf_t *c, char *data, int step)
-{
-    int next;
-
-    if (c->head == c->tail)
-        return -1;
-
-    if (step > c->head)
-        return -1;
-
-    next = c->tail + step;
-    if (next >= BUFF_SIZE)
-        next = 0;
-
-    for (int i=0; i<step; ++i)
-        data[i] = c->buffer[c->tail + i];
-    c->tail = next;
-    return 0;
-}*/
 ringbuff_t ring_buffer;
 char ring_buff_data[BUFF_SIZE];
+
+double get_wall_time() {
+    struct timeval time;
+    if (gettimeofday(&time, NULL))
+        return 0;
+    return (double)time.tv_sec + (double)time.tv_usec * 0.000001;
+}
+
+double get_cpu_time() {
+    return (double)clock() / CLOCKS_PER_SEC;
+}
 
 int main(int argc, char *argv[]) {
     int port, socket_fd, new_socket_fd;
@@ -100,13 +66,14 @@ int main(int argc, char *argv[]) {
     pthread_attr_t pthread_attr;
     producer_arg_t producer_arg = {
         .path = NULL,
-        .tempo = 0
+        .tempo = 0,
     };
     pthread_arg_t *pthread_arg;
     pthread_t pthread;
     socklen_t client_address_len;
     int c;
     char *localhost = "127.0.0.1";
+
     ringbuff_init(&ring_buffer, ring_buff_data, sizeof(ring_buff_data));
 
 
@@ -151,6 +118,11 @@ int main(int argc, char *argv[]) {
     }
     else if (Port == NULL) {
         printf("Invalid port\n");
+        abort();
+    }
+
+    if ((fp=fopen(producer_arg.path, "r+")) == NULL) {
+        printf("Cannot open file for writing\n");
         abort();
     }
 
@@ -209,11 +181,25 @@ int main(int argc, char *argv[]) {
         perror("pthread_mutex_init");
         exit(1);
     }
+
+    if (pthread_mutex_init(&file_lock, NULL) != 0) {
+        perror("pthread_mutex_init");
+        exit(1);
+    }
     /* Create thread to serve connection to client. */
     if (pthread_create(&pthread, &pthread_attr, producer_routine, (void *)&producer_arg) != 0) {
         perror("pthread_create");
         exit(1);
     }
+
+    /* Create thread to serve connection to client. */
+    if (pthread_create(&pthread, &pthread_attr, timer_routine, (void *)&producer_arg) != 0) {
+        perror("pthread_create");
+        exit(1);
+    }
+
+    wall0 = get_wall_time();
+    cpu0 = get_cpu_time();
 
     while (1) {
         /* Create pthread argument for each connection to client. */
@@ -235,6 +221,11 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        numOfConnectedClients++;
+
+        pthread_mutex_lock(&file_lock);
+        fprintf(fp, "[%f:%f] %s\n", get_wall_time() - wall0, get_cpu_time() - cpu0, inet_ntoa(pthread_arg->client_address.sin_addr));
+        pthread_mutex_unlock(&file_lock);
         /* Initialise pthread argument. */
         pthread_arg->new_socket_fd = new_socket_fd;
         /* TODO: Initialise arguments passed to threads here. See lines 22 and
@@ -257,25 +248,49 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
+void *timer_routine(void *arg) {
+
+    float occupancy;
+
+    while (1) {
+
+        pthread_mutex_lock(&circ_buf_lock);
+        occupancy = abs(ring_buffer.r - ring_buffer.w);
+        pthread_mutex_unlock(&circ_buf_lock);
+
+        pthread_mutex_lock(&file_lock);
+        fprintf(fp, "[%f:%f] %f, %f\n", get_wall_time() - wall0, get_cpu_time() - cpu0, occupancy, occupancy / BUFF_SIZE * 100);
+        pthread_mutex_unlock(&file_lock);
+        sleep(5);
+    }
+}
+
 void *pthread_routine(void *arg) {
     pthread_arg_t *pthread_arg = (pthread_arg_t *)arg;
     int new_socket_fd = pthread_arg->new_socket_fd;
-    struct sockaddr_in client_address = pthread_arg->client_address;
     char rxBuff[4];
     char txBuff[112 * 1024];
     size_t len;
+    int counter = 0;
 
     while (1) {
-        if (read(new_socket_fd, rxBuff, sizeof(rxBuff)) < 0)
+        if (read(new_socket_fd, rxBuff, sizeof(rxBuff)) <= 0)
             break;
+
         pthread_mutex_lock(&circ_buf_lock);
         while ((len = ringbuff_read(&ring_buffer, txBuff, sizeof(txBuff))));
         pthread_mutex_unlock(&circ_buf_lock);
 
-        write(new_socket_fd, txBuff, sizeof(txBuff));
+        if (write(new_socket_fd, txBuff, sizeof(txBuff)) <= 0)
+            break;
+        counter++;
     }
 
     close(new_socket_fd);
+    pthread_mutex_lock(&file_lock);
+    fprintf(fp, "[%f:%f] %s, %d\n", get_wall_time() - wall0, get_cpu_time() - cpu0, inet_ntoa(pthread_arg->client_address.sin_addr), counter);
+    pthread_mutex_unlock(&file_lock);
+
     return NULL;
 }
 
@@ -301,13 +316,11 @@ void *producer_routine(void *arg) {
         }
 
         pthread_mutex_lock(&circ_buf_lock);
-        //status = circ_bbuf_push(&circ_buf, buf, sizeof(buf));
         ringbuff_write(&ring_buffer, buf, sizeof(buf));
-
         pthread_mutex_unlock(&circ_buf_lock);
-        printf("Buf: %s\n", buf);
+        //printf("Buf: %s\n", buf);
         //printf("Tempo[us]: %d\n", time_us);
-        usleep(time_us / 100);
+        usleep(time_us);
     }
 
     return NULL;
@@ -315,5 +328,6 @@ void *producer_routine(void *arg) {
 
 void signal_handler(int signal_number) {
     /* TODO: Put exit cleanup code here. */
+    fclose(fp);
     exit(0);
 }
